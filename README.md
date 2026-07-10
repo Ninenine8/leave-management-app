@@ -2,6 +2,34 @@
 
 LeaveDesk is a local-first internal leave management app for a small Singapore company. It uses Python's built-in web server and SQLite, with no external package install required.
 
+## Tech Stack
+
+- Backend and UI: Python 3.12 standard library, `http.server`, server-rendered HTML
+- Database: SQLite
+- File storage: local filesystem for uploaded attachments
+- Styling: plain CSS in `static/styles.css`
+- Tests: Python `unittest`
+- Deployment target: Render web service with a persistent disk
+
+## Deployment Recommendation
+
+Recommended platform: Render.
+
+This app is a long-running Python web app that writes to SQLite and stores uploaded files. Render is a better fit than Vercel because Render runs a normal web service and supports persistent disks. Vercel functions have a read-only deployment filesystem with only temporary scratch space, so they are not a good fit for this app's SQLite database and uploaded attachments.
+
+Railway can also run this kind of app, but the included deployment files are already prepared for Render. Use Railway only if you prefer its dashboard and are comfortable configuring a persistent volume manually.
+
+## SQLite Production Suitability
+
+SQLite is acceptable for this app if all of these are true:
+
+- It is used by a small company.
+- The app runs as one web service instance.
+- The SQLite database is stored on a persistent disk.
+- Admins use the built-in backup export regularly.
+
+SQLite is not suitable if you need multiple app instances, heavy concurrent writes, advanced database administration, or managed point-in-time recovery. In that case, migrate to PostgreSQL on Render, Supabase, or Neon. For the current small-company internal use case, the simplest reliable deployment is Render plus a persistent disk.
+
 ## Install
 
 No dependencies are required beyond Python 3.12 or newer.
@@ -45,6 +73,8 @@ DB_PATH=/var/data/leave_app.sqlite3
 
 `PORT` is usually supplied automatically by the hosting platform.
 
+See `.env.example` for a copyable template. Do not commit real `.env` files.
+
 ## Database Setup And Migrations
 
 The database is created and migrated automatically when the app starts.
@@ -62,9 +92,11 @@ On Render, use a persistent disk mounted at `/var/data` so the SQLite database a
 
 ## Deploy To Render
 
-Recommended platform: Render.
+Recommended platform: Render paid web service with a persistent disk.
 
 Reason: this is a stateful Python + SQLite internal app. Render can run the Python server and attach a persistent disk. Vercel is not recommended for this app because serverless deployments are a poor fit for local SQLite writes and uploaded files.
+
+Important: do not deploy this app on a free/ephemeral service without a persistent disk. If the database is not stored under `/var/data`, company data can disappear on restart or redeploy.
 
 ### Deployment Files Included
 
@@ -81,7 +113,8 @@ Reason: this is a stateful Python + SQLite internal app. Render can run the Pyth
 4. Connect the GitHub repository.
 5. Render will read `render.yaml`.
 6. Confirm the web service named `leavedesk`.
-7. Confirm the persistent disk:
+7. Confirm the service plan supports persistent disks.
+8. Confirm the persistent disk:
 
 ```text
 Name: leavedesk-data
@@ -89,7 +122,7 @@ Mount path: /var/data
 Size: 1 GB
 ```
 
-8. Deploy.
+9. Deploy.
 
 Render build command:
 
@@ -108,6 +141,14 @@ Render health check:
 ```text
 /healthz
 ```
+
+Database setup command:
+
+```text
+No separate command is required.
+```
+
+The app creates and migrates the SQLite database automatically during startup.
 
 ### Render Environment Variables
 
