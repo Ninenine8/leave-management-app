@@ -15,7 +15,7 @@ services:
         value: /var/data/uploads
       - key: DB_PATH
         value: /var/data/leave_app.sqlite3
-    disks:
-      - name: leavedesk-data
-        mountPath: /var/data
-        sizeGB: 1
+    disk:
+      name: leavedesk-data
+      mountPath: /var/data
+      sizeGB: 1
