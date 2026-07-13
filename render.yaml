@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: leavedesk
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt && python -m py_compile app.py leave_rules.py
+    startCommand: python app.py
+    healthCheckPath: /healthz
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: DATA_DIR
+        value: /var/data
+      - key: UPLOAD_DIR
+        value: /var/data/uploads
+      - key: DB_PATH
+        value: /var/data/leave_app.sqlite3
+    disk:
+      name: leavedesk-data
+      mountPath: /var/data
+      sizeGB: 1
