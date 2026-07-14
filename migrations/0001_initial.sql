@@ -23,6 +23,11 @@ CREATE TABLE IF NOT EXISTS employees (
   approver_user_id INTEGER,
   status TEXT NOT NULL DEFAULT 'active',
   notes TEXT,
+  invite_token TEXT,
+  invitation_status TEXT NOT NULL DEFAULT 'active',
+  invitation_created_at TEXT,
+  invitation_used_at TEXT,
+  pending_role TEXT NOT NULL DEFAULT 'employee',
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT
 );
@@ -189,3 +194,4 @@ CREATE INDEX IF NOT EXISTS idx_leave_requests_employee ON leave_requests(employe
 CREATE INDEX IF NOT EXISTS idx_leave_requests_approver ON leave_requests(approver_user_id);
 CREATE INDEX IF NOT EXISTS idx_oil_employee ON off_in_lieu_credits(employee_id);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_employees_invite_token ON employees(invite_token);

@@ -31,6 +31,7 @@ async function handleRequest(request, env) {
   if (url.pathname === "/style.css") return new Response(css(), { headers: { "content-type": "text/css; charset=utf-8" } });
   if (url.pathname === "/setup") return request.method === "POST" ? createFirstAdmin(request, env) : setupPage(env);
   if (setupNeeded) return redirect("/setup");
+  if (url.pathname.startsWith("/activate/")) return request.method === "POST" ? activateInvite(request, env, tokenFromPath(url.pathname)) : activateInvitePage(env, tokenFromPath(url.pathname));
   if (url.pathname === "/login") return request.method === "POST" ? login(request, env) : loginPage();
   if (url.pathname === "/logout") return logout(request, env);
   if (!user) return redirect("/login");
@@ -85,6 +86,32 @@ async function loginPage(message = "") {
   return htmlPage("Login", `<section class="auth"><h1>LeaveDesk Login</h1>${message ? `<p class="error">${escapeHtml(message)}</p>` : ""}<form method="post" class="form-grid">${input("Email", "email", "email")}${input("Password", "password", "password")}<button>Log in</button></form></section>`);
 }
 
+async function activateInvitePage(env, token, error = "") {
+  const employee = await env.DB.prepare("SELECT * FROM employees WHERE invite_token = ? AND invitation_status = 'pending'").bind(token).first();
+  if (!employee) return htmlPage("Invalid invite", `<section class="auth"><h1>Invite not available</h1><p class="error">This activation link is invalid or has already been used.</p></section>`, null, 404);
+  return htmlPage("Create account", `<section class="auth"><h1>Create Your Account</h1><p>For ${escapeHtml(employee.name)}. Role: ${escapeHtml(employee.pending_role || "employee")}.</p>${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}<form method="post" class="form-grid">${input("Email", "email", "email")}${input("Password", "password", "password")}${input("Confirm password", "confirm_password", "password")}<button>Create account</button></form></section>`);
+}
+
+async function activateInvite(request, env, token) {
+  const employee = await env.DB.prepare("SELECT * FROM employees WHERE invite_token = ? AND invitation_status = 'pending'").bind(token).first();
+  if (!employee) return activateInvitePage(env, token);
+  const data = await request.formData();
+  const email = String(data.get("email") || "").toLowerCase().trim();
+  const password = String(data.get("password") || "");
+  if (!email) return activateInvitePage(env, token, "Email is required.");
+  if (password !== String(data.get("confirm_password") || "")) return activateInvitePage(env, token, "Passwords do not match.");
+  const existing = await env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(email).first();
+  if (existing) return activateInvitePage(env, token, "This email is already used.");
+  const passwordHash = await hashPassword(password);
+  const role = ["admin", "manager", "employee"].includes(employee.pending_role) ? employee.pending_role : "employee";
+  const user = await env.DB.prepare("INSERT INTO users (employee_id, email, password_hash, role, active) VALUES (?, ?, ?, ?, 1) RETURNING id")
+    .bind(employee.id, email, passwordHash, role).first();
+  await env.DB.prepare("UPDATE employees SET email = ?, invite_token = NULL, invitation_status = 'active', invitation_used_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+    .bind(email, employee.id).run();
+  await audit(env, user.id, "user_account_activated", { employee_id: employee.id }, { email, role }, "Employee created own email and password from invite.");
+  return redirect("/login");
+}
+
 async function login(request, env) {
   const data = await request.formData();
   const email = String(data.get("email") || "").toLowerCase();
@@ -133,7 +160,8 @@ async function adminDashboard(env, user) {
   const empRows = [];
   for (const e of employees.results) {
     const b = await employeeBalance(env, e.id, year);
-    empRows.push(`<tr><td>${escapeHtml(e.name)}<small>${escapeHtml(e.email)}</small></td><td>${escapeHtml(e.department)}</td><td>${escapeHtml(e.join_date)}</td><td>${b.probation.underProbation ? "Yes" : "No"}</td><td>${b.completedMonths}</td><td>${b.annualEntitlement}</td><td>${b.annualBalance}</td><td>${b.mcBalance}</td><td>${b.hospitalisationBalance}</td><td>${b.childcareBalance}</td><td>${b.oilBalance}</td><td>${status(e.status)}</td><td><a href="/admin/employees/${e.id}/edit">Edit</a></td></tr>`);
+    const accountText = e.invitation_status === "pending" && e.invite_token ? `<small>Pending account: <code>/activate/${escapeHtml(e.invite_token)}</code></small>` : `<small>${escapeHtml(e.email)}</small>`;
+    empRows.push(`<tr><td>${escapeHtml(e.name)}${accountText}</td><td>${escapeHtml(e.department)}</td><td>${escapeHtml(e.join_date)}</td><td>${b.probation.underProbation ? "Yes" : "No"}</td><td>${b.completedMonths}</td><td>${b.annualEntitlement}</td><td>${b.annualBalance}</td><td>${b.mcBalance}</td><td>${b.hospitalisationBalance}</td><td>${b.childcareBalance}</td><td>${b.oilBalance}</td><td>${status(e.status)}</td><td><a href="/admin/employees/${e.id}/edit">Edit</a></td></tr>`);
   }
   const reqRows = requests.results.map((r) => `<tr><td>${escapeHtml(r.name)}</td><td>${escapeHtml(r.leave_type)}</td><td>${r.start_date} to ${r.end_date}</td><td>${r.days}</td><td>${r.attachment_key ? `<a href="/attachments/${r.id}">Attachment</a>` : ""}</td><td class="actions"><form method="post" action="/admin/requests/${r.id}/approve"><button>Approve</button></form><form method="post" action="/admin/requests/${r.id}/reject"><button class="danger">Reject</button></form></td></tr>`).join("");
   return htmlPage("Admin", `<header class="page-head"><div><h1>Admin dashboard</h1><p>Employees, pending approvals, exports, and setup.</p></div><div class="actions"><a class="button" href="/admin/employees/new">Add employee/user</a><a class="button ghost" href="/admin/settings">Settings</a><a class="button ghost" href="/admin/holidays">Public holidays</a><a class="button ghost" href="/admin/export/employees.csv">Export employees</a><a class="button ghost" href="/admin/export/leaves.csv">Export leaves</a><a class="button ghost" href="/admin/export/audit-log.csv">Export audit log</a></div></header>
@@ -187,7 +215,7 @@ async function saveAdminSettings(request, env, user) {
 async function employeeForm(env, user) {
   const approvers = await env.DB.prepare("SELECT users.id, employees.name, users.role FROM users JOIN employees ON employees.id = users.employee_id WHERE users.active = 1 AND users.role IN ('admin', 'manager') ORDER BY employees.name").all();
   const opts = [`<option value="">Admin / HR fallback</option>`, ...approvers.results.map((a) => `<option value="${a.id}">${escapeHtml(a.name)} (${a.role})</option>`)].join("");
-  return htmlPage("Add employee", `<section class="panel"><h1>Add employee or user</h1><form method="post" class="form-grid">${input("Name", "name")}${input("Email", "email", "email")}${input("Department", "department")}${input("Job title", "job_title", "text", "", false)}${input("Join date", "join_date", "date")}${input("Password", "password", "password")}<label>Role<select name="role"><option value="employee">Employee</option><option value="manager">Manager / Approver</option><option value="admin">Admin / HR</option></select></label><label>Work pattern<select name="work_pattern"><option value="five_day">5-day Monday to Friday</option><option value="five_half_day">5.5-day week</option><option value="six_day">6-day week</option><option value="custom">Custom</option></select></label><label>Approver<select name="approver_user_id">${opts}</select></label>${input("Annual entitlement", "annual_entitlement", "number", "14")}${input("MC entitlement", "mc_entitlement", "number", "14")}${input("Hospitalisation entitlement", "hospitalisation_entitlement", "number", "60")}${input("Childcare entitlement", "childcare_entitlement", "number", "0")}${input("Probation period months", "probation_period_months", "number", "3")}<label><input type="checkbox" name="childcare_eligible" value="1"> Childcare leave eligible</label><label>Notes<textarea name="notes"></textarea></label><button>Save</button></form></section>`, user);
+  return htmlPage("Add employee", `<section class="panel"><h1>Add employee or user</h1><p class="notice">Admin creates the employee profile only. The employee will create their own email and password using the activation link shown after saving.</p><form method="post" class="form-grid">${input("Name", "name")}${input("Department", "department")}${input("Job title", "job_title", "text", "", false)}${input("Join date", "join_date", "date")}<label>Role<select name="role"><option value="employee">Employee</option><option value="manager">Manager / Approver</option><option value="admin">Admin / HR</option></select></label><label>Work pattern<select name="work_pattern"><option value="five_day">5-day Monday to Friday</option><option value="five_half_day">5.5-day week</option><option value="six_day">6-day week</option><option value="custom">Custom</option></select></label><label>Approver<select name="approver_user_id">${opts}</select></label>${input("Annual entitlement", "annual_entitlement", "number", "14")}${input("MC entitlement", "mc_entitlement", "number", "14")}${input("Hospitalisation entitlement", "hospitalisation_entitlement", "number", "60")}${input("Childcare entitlement", "childcare_entitlement", "number", "0")}${input("Probation period months", "probation_period_months", "number", "3")}<label><input type="checkbox" name="childcare_eligible" value="1"> Childcare leave eligible</label><label>Notes<textarea name="notes"></textarea></label><button>Save and create activation link</button></form></section>`, user);
 }
 
 async function createEmployee(request, env, user) {
@@ -195,21 +223,23 @@ async function createEmployee(request, env, user) {
   const joinDate = String(data.get("join_date"));
   const probationMonths = Number(data.get("probation_period_months") || 3);
   const probation = probationEndDate(joinDate, probationMonths);
+  const inviteToken = cryptoRandom();
+  const placeholderEmail = `pending-${inviteToken}@pending.local`;
+  const role = String(data.get("role") || "employee");
   const employee = await env.DB.prepare(`
-    INSERT INTO employees (name, email, department, job_title, join_date, probation_start_date, probation_period_months, probation_end_date, annual_entitlement, mc_entitlement, hospitalisation_entitlement, childcare_eligible, childcare_entitlement, work_pattern, approver_user_id, status, notes)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?) RETURNING id
-  `).bind(data.get("name"), String(data.get("email")).toLowerCase(), data.get("department"), data.get("job_title") || "", joinDate, joinDate, probationMonths, probation, Number(data.get("annual_entitlement") || 14), Number(data.get("mc_entitlement") || 14), Number(data.get("hospitalisation_entitlement") || 60), data.get("childcare_eligible") === "1" ? 1 : 0, Number(data.get("childcare_entitlement") || 0), data.get("work_pattern") || "five_day", nullableInt(data.get("approver_user_id")), data.get("notes") || "").first();
-  const passwordHash = await hashPassword(String(data.get("password") || "Password123"));
-  const userRow = await env.DB.prepare("INSERT INTO users (employee_id, email, password_hash, role, active) VALUES (?, ?, ?, ?, 1) RETURNING id").bind(employee.id, String(data.get("email")).toLowerCase(), passwordHash, data.get("role") || "employee").first();
-  await audit(env, user.id, "employee_created", null, { employee_id: employee.id, email: String(data.get("email")).toLowerCase(), role: data.get("role") }, "Employee/user created.");
+    INSERT INTO employees (name, email, department, job_title, join_date, probation_start_date, probation_period_months, probation_end_date, annual_entitlement, mc_entitlement, hospitalisation_entitlement, childcare_eligible, childcare_entitlement, work_pattern, approver_user_id, status, notes, invite_token, invitation_status, invitation_created_at, pending_role)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, 'pending', CURRENT_TIMESTAMP, ?) RETURNING id
+  `).bind(data.get("name"), placeholderEmail, data.get("department"), data.get("job_title") || "", joinDate, joinDate, probationMonths, probation, Number(data.get("annual_entitlement") || 14), Number(data.get("mc_entitlement") || 14), Number(data.get("hospitalisation_entitlement") || 60), data.get("childcare_eligible") === "1" ? 1 : 0, Number(data.get("childcare_entitlement") || 0), data.get("work_pattern") || "five_day", nullableInt(data.get("approver_user_id")), data.get("notes") || "", inviteToken, role).first();
+  await audit(env, user.id, "employee_created", null, { employee_id: employee.id, role, invitation_status: "pending" }, "Employee profile created. Employee must activate their own account.");
   await generateCreditsForEmployee(env, user.id, employee.id);
-  return redirect("/admin");
+  const link = `${new URL(request.url).origin}/activate/${inviteToken}`;
+  return htmlPage("Activation link", `<section class="panel"><h1>Employee profile created</h1><p>Send this private activation link to ${escapeHtml(data.get("name"))}. They will create their own email and password.</p><p><code>${escapeHtml(link)}</code></p><p><a class="button" href="/admin">Back to admin</a></p></section>`, user);
 }
 
 async function editEmployeeForm(env, user, employeeId, error = "") {
   const employee = await env.DB.prepare(`
-    SELECT employees.*, users.email AS login_email, users.role, users.active
-    FROM employees JOIN users ON users.employee_id = employees.id
+    SELECT employees.*, users.id AS user_id, users.email AS login_email, COALESCE(users.role, employees.pending_role) AS role, COALESCE(users.active, 0) AS active
+    FROM employees LEFT JOIN users ON users.employee_id = employees.id
     WHERE employees.id = ?
   `).bind(employeeId).first();
   if (!employee) return htmlPage("Employee not found", `<p class="error">Employee not found.</p><p><a href="/admin">Back to admin</a></p>`, user, 404);
@@ -231,7 +261,7 @@ async function editEmployeeForm(env, user, employeeId, error = "") {
   const balances = await employeeBalance(env, employeeId, 2026);
   return htmlPage("Edit employee", `<section class="panel"><h1>Edit employee</h1>${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}<p>${escapeHtml(calc.explanation)}</p><p><strong>Probation:</strong> ${probation.underProbation ? "Yes" : "No"} | Start: ${escapeHtml(probation.startDate)} | End: ${escapeHtml(probation.endDate)} | Days remaining: ${probation.daysRemaining}</p><p class="notice">Changing join date, probation, or entitlements recalculates displayed leave balances. Manual adjustments below are kept separately and still apply.</p><form method="post" class="form-grid">
     ${input("Name", "name", "text", employee.name)}
-    ${input("Email", "email", "email", employee.email)}
+    ${input(employee.user_id ? "Login email" : "Login email (created by employee from invite)", "email", "email", employee.user_id ? employee.email : "", Boolean(employee.user_id))}
     ${input("Department", "department", "text", employee.department)}
     ${input("Job title", "job_title", "text", employee.job_title || "", false)}
     ${input("Join date", "join_date", "date", employee.join_date)}
@@ -269,6 +299,7 @@ async function editEmployeeForm(env, user, employeeId, error = "") {
     <label><input type="checkbox" name="childcare_eligible" value="1" ${employee.childcare_eligible ? "checked" : ""}> Childcare leave eligible</label>
     <label><input type="checkbox" name="extended_childcare_eligible" value="1" ${employee.extended_childcare_eligible ? "checked" : ""}> Extended childcare leave eligible</label>
     <label><input type="checkbox" name="active" value="1" ${employee.active ? "checked" : ""}> Login account active</label>
+    ${employee.invitation_status === "pending" && employee.invite_token ? `<p><strong>Activation link:</strong> <code>/activate/${escapeHtml(employee.invite_token)}</code></p>` : ""}
     <label>Notes<textarea name="notes">${escapeHtml(employee.notes || "")}</textarea></label>
     <label>Manual annual adjustment<input name="adjust_annual" type="number" step="0.5" value="0"></label>
     <label>Manual MC adjustment<input name="adjust_medical" type="number" step="0.5" value="0"></label>
@@ -281,8 +312,8 @@ async function editEmployeeForm(env, user, employeeId, error = "") {
 
 async function updateEmployee(request, env, user, employeeId) {
   const before = await env.DB.prepare(`
-    SELECT employees.*, users.id AS user_id, users.role, users.active
-    FROM employees JOIN users ON users.employee_id = employees.id
+    SELECT employees.*, users.id AS user_id, COALESCE(users.role, employees.pending_role) AS role, COALESCE(users.active, 0) AS active
+    FROM employees LEFT JOIN users ON users.employee_id = employees.id
     WHERE employees.id = ?
   `).bind(employeeId).first();
   if (!before) return htmlPage("Employee not found", `<p class="error">Employee not found.</p><p><a href="/admin">Back to admin</a></p>`, user, 404);
@@ -291,7 +322,7 @@ async function updateEmployee(request, env, user, employeeId) {
   if (approverUserId && approverUserId === before.user_id) return editEmployeeForm(env, user, employeeId, "Employee cannot be their own approver.");
   const after = {
     name: String(data.get("name") || "").trim(),
-    email: String(data.get("email") || "").toLowerCase().trim(),
+    email: before.user_id ? String(data.get("email") || "").toLowerCase().trim() : before.email,
     department: String(data.get("department") || "").trim(),
     job_title: String(data.get("job_title") || "").trim(),
     join_date: String(data.get("join_date") || ""),
@@ -322,8 +353,12 @@ async function updateEmployee(request, env, user, employeeId) {
   `).bind(after.name, after.email, after.department, after.job_title, after.join_date, after.probation_start_date, after.probation_period_months, after.probation_end_date, after.probation_status_override, after.annual_entitlement,
     after.mc_entitlement, after.hospitalisation_entitlement, after.childcare_eligible, after.childcare_entitlement, after.extended_childcare_eligible,
     after.mom_eligibility_override, after.work_pattern, after.custom_work_days, after.approver_user_id, after.status, after.notes, employeeId).run();
-  await env.DB.prepare("UPDATE users SET email = ?, role = ?, active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
-    .bind(after.email, after.role, after.active, before.user_id).run();
+  if (before.user_id) {
+    await env.DB.prepare("UPDATE users SET email = ?, role = ?, active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+      .bind(after.email, after.role, after.active, before.user_id).run();
+  } else {
+    await env.DB.prepare("UPDATE employees SET pending_role = ? WHERE id = ?").bind(after.role, employeeId).run();
+  }
   if (before.join_date !== after.join_date) await audit(env, user.id, "join_date_changed", { join_date: before.join_date }, { join_date: after.join_date, employee_id: employeeId }, "Join date changed by admin.");
   if (Number(before.annual_entitlement) !== after.annual_entitlement) await audit(env, user.id, "entitlement_changed", { annual_entitlement: before.annual_entitlement }, { annual_entitlement: after.annual_entitlement, employee_id: employeeId }, "Annual entitlement changed by admin.");
   if (Number(before.mc_entitlement) !== after.mc_entitlement) await audit(env, user.id, "mc_entitlement_changed", { mc_entitlement: before.mc_entitlement }, { mc_entitlement: after.mc_entitlement, employee_id: employeeId }, "MC entitlement changed by admin.");
@@ -625,6 +660,9 @@ function cookie(request, name) {
 }
 function idFromPath(path) {
   return Number(path.split("/").filter(Boolean).find((x) => /^\d+$/.test(x)));
+}
+function tokenFromPath(path) {
+  return path.split("/").filter(Boolean).at(-1) || "";
 }
 function nullableInt(value) {
   const n = Number(value);

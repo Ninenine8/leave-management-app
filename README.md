@@ -182,10 +182,15 @@ After one admin exists, `/setup` redirects away and public signup is disabled.
 ### Create Employee And Assign Approver
 
 1. Open **Admin > Add employee/user**.
-2. Enter the employee details.
+2. Enter the employee profile details.
 3. Set role to **Employee**.
 4. Choose the boss/manager in **Approver**.
 5. Save.
+6. Copy the activation link shown after saving.
+7. Send the activation link privately to the employee.
+8. The employee opens the link and creates their own email and password.
+
+Admin does not set employee passwords. For normal employee/manager/admin accounts, Admin creates the profile and the user activates the login account themselves. This keeps public signup disabled while avoiding admin-known passwords.
 
 ### Edit Join Date, Probation, Entitlements, And Balances
 
