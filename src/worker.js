@@ -41,6 +41,7 @@ async function handleRequest(request, env) {
   if (url.pathname.startsWith("/manager/requests/") && request.method === "POST") return requireManager(user, () => decideLeave(env, user, idFromPath(url.pathname), url.pathname.endsWith("/approve") ? "approved" : "rejected", false));
   if (url.pathname === "/admin") return requireAdmin(user, () => adminDashboard(env, user));
   if (url.pathname === "/admin/employees/new") return requireAdmin(user, () => request.method === "POST" ? createEmployee(request, env, user) : employeeForm(env, user));
+  if (url.pathname.startsWith("/admin/employees/") && url.pathname.endsWith("/edit")) return requireAdmin(user, () => request.method === "POST" ? updateEmployee(request, env, user, idFromPath(url.pathname)) : editEmployeeForm(env, user, idFromPath(url.pathname)));
   if (url.pathname === "/admin/holidays") return requireAdmin(user, () => request.method === "POST" ? addHoliday(request, env, user) : holidaysPage(env, user));
   if (url.pathname === "/admin/off-in-lieu/generate" && request.method === "POST") return requireAdmin(user, () => generateOffInLieu(env, user));
   if (url.pathname.startsWith("/admin/requests/") && request.method === "POST") return requireAdmin(user, () => decideLeave(env, user, idFromPath(url.pathname), url.pathname.endsWith("/approve") ? "approved" : "rejected", true));
@@ -130,12 +131,12 @@ async function adminDashboard(env, user) {
   const empRows = [];
   for (const e of employees.results) {
     const b = await employeeBalance(env, e.id, year);
-    empRows.push(`<tr><td>${escapeHtml(e.name)}<small>${escapeHtml(e.email)}</small></td><td>${escapeHtml(e.department)}</td><td>${escapeHtml(e.join_date)}</td><td>${b.completedMonths}</td><td>${b.annualEntitlement}</td><td>${b.annualBalance}</td><td>${b.oilBalance}</td><td>${status(e.status)}</td></tr>`);
+    empRows.push(`<tr><td>${escapeHtml(e.name)}<small>${escapeHtml(e.email)}</small></td><td>${escapeHtml(e.department)}</td><td>${escapeHtml(e.join_date)}</td><td>${b.completedMonths}</td><td>${b.annualEntitlement}</td><td>${b.annualBalance}</td><td>${b.oilBalance}</td><td>${status(e.status)}</td><td><a href="/admin/employees/${e.id}/edit">Edit</a></td></tr>`);
   }
   const reqRows = requests.results.map((r) => `<tr><td>${escapeHtml(r.name)}</td><td>${escapeHtml(r.leave_type)}</td><td>${r.start_date} to ${r.end_date}</td><td>${r.days}</td><td>${r.attachment_key ? `<a href="/attachments/${r.id}">Attachment</a>` : ""}</td><td class="actions"><form method="post" action="/admin/requests/${r.id}/approve"><button>Approve</button></form><form method="post" action="/admin/requests/${r.id}/reject"><button class="danger">Reject</button></form></td></tr>`).join("");
   return htmlPage("Admin", `<header class="page-head"><div><h1>Admin dashboard</h1><p>Employees, pending approvals, exports, and setup.</p></div><div class="actions"><a class="button" href="/admin/employees/new">Add employee/user</a><a class="button ghost" href="/admin/holidays">Public holidays</a><a class="button ghost" href="/admin/export/employees.csv">Export employees</a><a class="button ghost" href="/admin/export/leaves.csv">Export leaves</a><a class="button ghost" href="/admin/export/audit-log.csv">Export audit log</a></div></header>
     <section class="panel"><h2>Pending requests</h2><table><thead><tr><th>Employee</th><th>Type</th><th>Dates</th><th>Days</th><th>File</th><th>Action</th></tr></thead><tbody>${reqRows || emptyRow(6)}</tbody></table></section>
-    <section class="panel"><h2>Employees</h2><table><thead><tr><th>Name</th><th>Dept</th><th>Join date</th><th>Months</th><th>2026 entitlement</th><th>Annual bal.</th><th>OIL bal.</th><th>Status</th></tr></thead><tbody>${empRows.join("") || emptyRow(8)}</tbody></table></section>`, user);
+    <section class="panel"><h2>Employees</h2><table><thead><tr><th>Name</th><th>Dept</th><th>Join date</th><th>Months</th><th>2026 entitlement</th><th>Annual bal.</th><th>OIL bal.</th><th>Status</th><th>Action</th></tr></thead><tbody>${empRows.join("") || emptyRow(9)}</tbody></table></section>`, user);
 }
 
 async function managerDashboard(env, user) {
@@ -147,7 +148,7 @@ async function managerDashboard(env, user) {
 async function employeeForm(env, user) {
   const approvers = await env.DB.prepare("SELECT users.id, employees.name, users.role FROM users JOIN employees ON employees.id = users.employee_id WHERE users.active = 1 AND users.role IN ('admin', 'manager') ORDER BY employees.name").all();
   const opts = [`<option value="">Admin / HR fallback</option>`, ...approvers.results.map((a) => `<option value="${a.id}">${escapeHtml(a.name)} (${a.role})</option>`)].join("");
-  return htmlPage("Add employee", `<section class="panel"><h1>Add employee or user</h1><form method="post" class="form-grid">${input("Name", "name")}${input("Email", "email", "email")}${input("Department", "department")}${input("Job title", "job_title")}${input("Join date", "join_date", "date")}${input("Password", "password", "password")}<label>Role<select name="role"><option value="employee">Employee</option><option value="manager">Manager / Approver</option><option value="admin">Admin / HR</option></select></label><label>Work pattern<select name="work_pattern"><option value="five_day">5-day Monday to Friday</option><option value="five_half_day">5.5-day week</option><option value="six_day">6-day week</option><option value="custom">Custom</option></select></label><label>Approver<select name="approver_user_id">${opts}</select></label>${input("Annual entitlement", "annual_entitlement", "number", "14")}<button>Save</button></form></section>`, user);
+  return htmlPage("Add employee", `<section class="panel"><h1>Add employee or user</h1><form method="post" class="form-grid">${input("Name", "name")}${input("Email", "email", "email")}${input("Department", "department")}${input("Job title", "job_title", "text", "", false)}${input("Join date", "join_date", "date")}${input("Password", "password", "password")}<label>Role<select name="role"><option value="employee">Employee</option><option value="manager">Manager / Approver</option><option value="admin">Admin / HR</option></select></label><label>Work pattern<select name="work_pattern"><option value="five_day">5-day Monday to Friday</option><option value="five_half_day">5.5-day week</option><option value="six_day">6-day week</option><option value="custom">Custom</option></select></label><label>Approver<select name="approver_user_id">${opts}</select></label>${input("Annual entitlement", "annual_entitlement", "number", "14")}<button>Save</button></form></section>`, user);
 }
 
 async function createEmployee(request, env, user) {
@@ -162,6 +163,99 @@ async function createEmployee(request, env, user) {
   const userRow = await env.DB.prepare("INSERT INTO users (employee_id, email, password_hash, role, active) VALUES (?, ?, ?, ?, 1) RETURNING id").bind(employee.id, String(data.get("email")).toLowerCase(), passwordHash, data.get("role") || "employee").first();
   await audit(env, user.id, "employee_created", null, { employee_id: employee.id, email: String(data.get("email")).toLowerCase(), role: data.get("role") }, "Employee/user created.");
   await generateCreditsForEmployee(env, user.id, employee.id);
+  return redirect("/admin");
+}
+
+async function editEmployeeForm(env, user, employeeId, error = "") {
+  const employee = await env.DB.prepare(`
+    SELECT employees.*, users.email AS login_email, users.role, users.active
+    FROM employees JOIN users ON users.employee_id = employees.id
+    WHERE employees.id = ?
+  `).bind(employeeId).first();
+  if (!employee) return htmlPage("Employee not found", `<p class="error">Employee not found.</p><p><a href="/admin">Back to admin</a></p>`, user, 404);
+  const approvers = await env.DB.prepare(`
+    SELECT users.id, employees.name, users.role
+    FROM users JOIN employees ON employees.id = users.employee_id
+    WHERE users.active = 1 AND users.role IN ('admin', 'manager') AND employees.id != ?
+    ORDER BY employees.name
+  `).bind(employeeId).all();
+  const approverOptions = [`<option value="">Admin / HR fallback</option>`, ...approvers.results.map((a) => `<option value="${a.id}" ${String(employee.approver_user_id || "") === String(a.id) ? "selected" : ""}>${escapeHtml(a.name)} (${a.role})</option>`)].join("");
+  const calc = calculateAnnualLeaveEntitlement({
+    joinDate: employee.join_date,
+    calculationYear: 2026,
+    annualEntitlementDays: employee.annual_entitlement,
+    enforceThreeMonthRule: (await setting(env, "enforce_mom_three_month_rule", "yes")) === "yes",
+    companyOverride: Boolean(employee.mom_eligibility_override),
+  });
+  return htmlPage("Edit employee", `<section class="panel"><h1>Edit employee</h1>${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}<p>${escapeHtml(calc.explanation)}</p><form method="post" class="form-grid">
+    ${input("Name", "name", "text", employee.name)}
+    ${input("Email", "email", "email", employee.email)}
+    ${input("Department", "department", "text", employee.department)}
+    ${input("Job title", "job_title", "text", employee.job_title || "", false)}
+    ${input("Join date", "join_date", "date", employee.join_date)}
+    ${input("Probation end date", "probation_end_date", "date", employee.probation_end_date)}
+    ${input("Annual entitlement", "annual_entitlement", "number", String(employee.annual_entitlement))}
+    <label>Role<select name="role">
+      <option value="employee" ${employee.role === "employee" ? "selected" : ""}>Employee</option>
+      <option value="manager" ${employee.role === "manager" ? "selected" : ""}>Manager / Approver</option>
+      <option value="admin" ${employee.role === "admin" ? "selected" : ""}>Admin / HR</option>
+    </select></label>
+    <label>Work pattern<select name="work_pattern">
+      <option value="five_day" ${employee.work_pattern === "five_day" ? "selected" : ""}>5-day Monday to Friday</option>
+      <option value="five_half_day" ${employee.work_pattern === "five_half_day" ? "selected" : ""}>5.5-day week</option>
+      <option value="six_day" ${employee.work_pattern === "six_day" ? "selected" : ""}>6-day week</option>
+      <option value="custom" ${employee.work_pattern === "custom" ? "selected" : ""}>Custom</option>
+    </select></label>
+    <label>Custom work days<input name="custom_work_days" value="${escapeHtml(employee.custom_work_days || "")}" placeholder="1,2,3,4,5"></label>
+    <label>Approver<select name="approver_user_id">${approverOptions}</select></label>
+    <label>Status<select name="status">
+      <option value="active" ${employee.status === "active" ? "selected" : ""}>Active</option>
+      <option value="inactive" ${employee.status === "inactive" ? "selected" : ""}>Inactive</option>
+      <option value="resigned" ${employee.status === "resigned" ? "selected" : ""}>Resigned</option>
+    </select></label>
+    <label><input type="checkbox" name="mom_eligibility_override" value="1" ${employee.mom_eligibility_override ? "checked" : ""}> Company override for MOM 3-month eligibility</label>
+    <label><input type="checkbox" name="active" value="1" ${employee.active ? "checked" : ""}> Login account active</label>
+    <button>Save changes</button><a class="button ghost" href="/admin">Cancel</a>
+  </form></section>`, user);
+}
+
+async function updateEmployee(request, env, user, employeeId) {
+  const before = await env.DB.prepare(`
+    SELECT employees.*, users.id AS user_id, users.role, users.active
+    FROM employees JOIN users ON users.employee_id = employees.id
+    WHERE employees.id = ?
+  `).bind(employeeId).first();
+  if (!before) return htmlPage("Employee not found", `<p class="error">Employee not found.</p><p><a href="/admin">Back to admin</a></p>`, user, 404);
+  const data = await request.formData();
+  const approverUserId = nullableInt(data.get("approver_user_id"));
+  if (approverUserId && approverUserId === before.user_id) return editEmployeeForm(env, user, employeeId, "Employee cannot be their own approver.");
+  const after = {
+    name: String(data.get("name") || "").trim(),
+    email: String(data.get("email") || "").toLowerCase().trim(),
+    department: String(data.get("department") || "").trim(),
+    job_title: String(data.get("job_title") || "").trim(),
+    join_date: String(data.get("join_date") || ""),
+    probation_end_date: String(data.get("probation_end_date") || ""),
+    annual_entitlement: Number(data.get("annual_entitlement") || 14),
+    role: String(data.get("role") || "employee"),
+    work_pattern: String(data.get("work_pattern") || "five_day"),
+    custom_work_days: String(data.get("custom_work_days") || ""),
+    approver_user_id: approverUserId,
+    status: String(data.get("status") || "active"),
+    mom_eligibility_override: data.get("mom_eligibility_override") === "1" ? 1 : 0,
+    active: data.get("active") === "1" ? 1 : 0,
+  };
+  await env.DB.prepare(`
+    UPDATE employees SET name = ?, email = ?, department = ?, job_title = ?, join_date = ?, probation_end_date = ?, annual_entitlement = ?,
+      mom_eligibility_override = ?, work_pattern = ?, custom_work_days = ?, approver_user_id = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).bind(after.name, after.email, after.department, after.job_title, after.join_date, after.probation_end_date, after.annual_entitlement, after.mom_eligibility_override, after.work_pattern, after.custom_work_days, after.approver_user_id, after.status, employeeId).run();
+  await env.DB.prepare("UPDATE users SET email = ?, role = ?, active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+    .bind(after.email, after.role, after.active, before.user_id).run();
+  if (before.join_date !== after.join_date) await audit(env, user.id, "join_date_changed", { join_date: before.join_date }, { join_date: after.join_date, employee_id: employeeId }, "Join date changed by admin.");
+  if (Number(before.annual_entitlement) !== after.annual_entitlement) await audit(env, user.id, "entitlement_changed", { annual_entitlement: before.annual_entitlement }, { annual_entitlement: after.annual_entitlement, employee_id: employeeId }, "Annual entitlement changed by admin.");
+  await audit(env, user.id, "employee_edited", before, after, "Employee profile updated.");
+  await generateCreditsForEmployee(env, user.id, employeeId);
   return redirect("/admin");
 }
 
@@ -370,8 +464,8 @@ function htmlPage(title, body, user = null, statusCode = 200) {
   return new Response(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><link rel="stylesheet" href="/style.css"></head><body><main>${nav}${body}</main></body></html>`, { status: statusCode, headers: { "content-type": "text/html; charset=utf-8" } });
 }
 
-function input(label, name, type = "text", value = "") {
-  return `<label>${escapeHtml(label)}<input name="${name}" type="${type}" value="${escapeHtml(value)}" required></label>`;
+function input(label, name, type = "text", value = "", required = true) {
+  return `<label>${escapeHtml(label)}<input name="${name}" type="${type}" value="${escapeHtml(value)}" ${required ? "required" : ""}></label>`;
 }
 function redirect(location, headers = {}) {
   return new Response("", { status: 303, headers: { location, ...headers } });
