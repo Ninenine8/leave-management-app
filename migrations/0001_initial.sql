@@ -7,13 +7,22 @@ CREATE TABLE IF NOT EXISTS employees (
   department TEXT NOT NULL,
   job_title TEXT,
   join_date TEXT NOT NULL,
+  probation_start_date TEXT,
+  probation_period_months INTEGER NOT NULL DEFAULT 3,
   probation_end_date TEXT NOT NULL,
+  probation_status_override TEXT NOT NULL DEFAULT 'auto',
   annual_entitlement REAL NOT NULL DEFAULT 14,
+  mc_entitlement REAL NOT NULL DEFAULT 14,
+  hospitalisation_entitlement REAL NOT NULL DEFAULT 60,
+  childcare_eligible INTEGER NOT NULL DEFAULT 0,
+  childcare_entitlement REAL NOT NULL DEFAULT 0,
+  extended_childcare_eligible INTEGER NOT NULL DEFAULT 0,
   mom_eligibility_override INTEGER NOT NULL DEFAULT 0,
   work_pattern TEXT NOT NULL DEFAULT 'five_day',
   custom_work_days TEXT,
   approver_user_id INTEGER,
   status TEXT NOT NULL DEFAULT 'active',
+  notes TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT
 );
@@ -138,7 +147,23 @@ INSERT OR IGNORE INTO leave_types (name, enabled, deducts_balance, balance_categ
   ('Off-in-lieu', 1, 1, 'off_in_lieu', 0, 0);
 
 INSERT OR IGNORE INTO settings (key, value) VALUES
+  ('company_name', 'LeaveDesk'),
+  ('leave_year_start', '01-01'),
+  ('leave_year_end', '12-31'),
+  ('default_work_pattern', 'five_day'),
+  ('default_annual_leave_entitlement', '14'),
   ('enforce_mom_three_month_rule', 'yes'),
+  ('allow_admin_annual_leave_override', 'yes'),
+  ('default_mc_entitlement', '14'),
+  ('enforce_mom_mc_three_month_rule', 'yes'),
+  ('require_mc_attachment', 'yes'),
+  ('default_hospitalisation_entitlement', '60'),
+  ('enforce_mom_hospitalisation_three_month_rule', 'yes'),
+  ('require_hospitalisation_attachment', 'yes'),
+  ('enable_childcare_leave', 'yes'),
+  ('default_childcare_entitlement', '6'),
+  ('default_probation_period_months', '3'),
+  ('allow_probation_manual_override', 'yes'),
   ('saturday_ph_compensation_method', 'off_in_lieu'),
   ('off_in_lieu_default_expiry_months', '12');
 

@@ -19,6 +19,7 @@ The production Cloudflare version is in:
 - `src/worker.js` - Cloudflare Worker app
 - `src/rules.js` - Singapore MOM leave and leave-day rules
 - `migrations/0001_initial.sql` - D1 database schema and seed settings
+- `migrations/0002_employee_leave_controls.sql` - employee leave controls, probation, MC, hospitalisation, childcare fields
 - `wrangler.toml` - Cloudflare Worker, D1, and R2 bindings
 - `package.json` - build, test, migration, and deploy scripts
 
@@ -63,7 +64,7 @@ npx wrangler login
 Run:
 
 ```bash
-npx wrangler d1 create leave-management-db
+npx wrangler d1 create leavedesk-db
 ```
 
 Copy the returned `database_id` into `wrangler.toml`:
@@ -71,7 +72,7 @@ Copy the returned `database_id` into `wrangler.toml`:
 ```toml
 [[d1_databases]]
 binding = "DB"
-database_name = "leave-management-db"
+database_name = "leavedesk-db"
 database_id = "PASTE_DATABASE_ID_HERE"
 migrations_dir = "migrations"
 ```
@@ -79,13 +80,13 @@ migrations_dir = "migrations"
 Apply the schema to Cloudflare:
 
 ```bash
-npx wrangler d1 migrations apply leave-management-db --remote
+npx wrangler d1 migrations apply leavedesk-db --remote
 ```
 
 For local Worker testing with D1:
 
 ```bash
-npx wrangler d1 migrations apply leave-management-db --local
+npx wrangler d1 migrations apply leavedesk-db --local
 ```
 
 ### Create Cloudflare R2 Bucket
@@ -185,6 +186,41 @@ After one admin exists, `/setup` redirects away and public signup is disabled.
 3. Set role to **Employee**.
 4. Choose the boss/manager in **Approver**.
 5. Save.
+
+### Edit Join Date, Probation, Entitlements, And Balances
+
+Admin can edit leave-related employee settings from:
+
+```text
+Admin dashboard > Employees > Edit
+```
+
+The edit page supports:
+
+- Name, email, department, and job title
+- Join date
+- Employment status
+- Work pattern
+- Reporting manager / approver
+- Annual leave entitlement
+- MC / outpatient sick leave entitlement
+- Hospitalisation leave entitlement
+- Childcare eligibility and entitlement
+- Probation start date
+- Probation period in months
+- Probation end date
+- Probation override status
+- Notes
+- Manual annual, MC, hospitalisation, and childcare balance adjustments
+
+If the join date changes, annual leave pro-ration is recalculated from the new join date. Manual balance adjustments are stored separately and continue to apply. Join date, entitlement, probation, approver, and manual balance changes are recorded in the audit log.
+
+Default probation is 3 months from join date, ending one day before the same date 3 months later. Example:
+
+```text
+Join date: 6 Apr 2026
+Default probation end date: 5 Jul 2026
+```
 
 ### Test Leave Request Flow
 

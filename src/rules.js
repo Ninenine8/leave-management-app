@@ -131,3 +131,9 @@ export function validateAttachment(file, leaveTypeName) {
   }
   return true;
 }
+
+export function probationEndDate(joinDate, months = 3) {
+  const end = addMonths(typeof joinDate === "string" ? parseDate(joinDate) : joinDate, Number(months));
+  end.setUTCDate(end.getUTCDate() - 1);
+  return formatDate(end);
+}

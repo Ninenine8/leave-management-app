@@ -3,6 +3,7 @@ import {
   chargeableLeaveDays,
   formatDate,
   parseDate,
+  probationEndDate,
   qualifiesForSaturdayOffInLieu,
   validateAttachment,
 } from "./rules.js";
@@ -40,6 +41,7 @@ async function handleRequest(request, env) {
   if (url.pathname === "/manager") return requireManager(user, () => managerDashboard(env, user));
   if (url.pathname.startsWith("/manager/requests/") && request.method === "POST") return requireManager(user, () => decideLeave(env, user, idFromPath(url.pathname), url.pathname.endsWith("/approve") ? "approved" : "rejected", false));
   if (url.pathname === "/admin") return requireAdmin(user, () => adminDashboard(env, user));
+  if (url.pathname === "/admin/settings") return requireAdmin(user, () => request.method === "POST" ? saveAdminSettings(request, env, user) : adminSettingsPage(env, user));
   if (url.pathname === "/admin/employees/new") return requireAdmin(user, () => request.method === "POST" ? createEmployee(request, env, user) : employeeForm(env, user));
   if (url.pathname.startsWith("/admin/employees/") && url.pathname.endsWith("/edit")) return requireAdmin(user, () => request.method === "POST" ? updateEmployee(request, env, user, idFromPath(url.pathname)) : editEmployeeForm(env, user, idFromPath(url.pathname)));
   if (url.pathname === "/admin/holidays") return requireAdmin(user, () => request.method === "POST" ? addHoliday(request, env, user) : holidaysPage(env, user));
@@ -67,12 +69,12 @@ async function createFirstAdmin(request, env) {
   const data = await request.formData();
   if (data.get("password") !== data.get("confirm_password")) return htmlPage("Setup", `<p class="error">Passwords do not match.</p><p><a href="/setup">Back</a></p>`, null, 400);
   const today = formatDate(new Date());
-  const probation = formatDate(addMonths(parseDate(today), 3));
+  const probation = probationEndDate(today, 3);
   const passwordHash = await hashPassword(String(data.get("password") || ""));
   const employee = await env.DB.prepare(`
-    INSERT INTO employees (name, email, department, job_title, join_date, probation_end_date, annual_entitlement, status)
-    VALUES (?, ?, 'HR', 'Admin', ?, ?, 14, 'active') RETURNING id
-  `).bind(data.get("name"), String(data.get("email")).toLowerCase(), today, probation).first();
+    INSERT INTO employees (name, email, department, job_title, join_date, probation_start_date, probation_period_months, probation_end_date, annual_entitlement, mc_entitlement, hospitalisation_entitlement, status)
+    VALUES (?, ?, 'HR', 'Admin', ?, ?, 3, ?, 14, 14, 60, 'active') RETURNING id
+  `).bind(data.get("name"), String(data.get("email")).toLowerCase(), today, today, probation).first();
   const user = await env.DB.prepare("INSERT INTO users (employee_id, email, password_hash, role, active) VALUES (?, ?, ?, 'admin', 1) RETURNING id")
     .bind(employee.id, String(data.get("email")).toLowerCase(), passwordHash).first();
   await audit(env, user.id, "first_admin_created", null, { email: String(data.get("email")).toLowerCase() }, "First admin setup.");
@@ -120,7 +122,7 @@ async function dashboard(env, user) {
   const approver = user.approver_user_id ? await env.DB.prepare("SELECT employees.name FROM users JOIN employees ON employees.id = users.employee_id WHERE users.id = ?").bind(user.approver_user_id).first() : null;
   const rows = requests.results.map((r) => `<tr><td>${escapeHtml(r.leave_type)}</td><td>${r.start_date} to ${r.end_date}</td><td>${r.days}</td><td>${status(r.status)}</td><td>${r.attachment_key ? `<a href="/attachments/${r.id}">Attachment</a>` : ""}</td></tr>`).join("");
   return htmlPage("My Leave", `<header class="page-head"><div><h1>My leave</h1><p>Approver: ${escapeHtml(approver?.name || "Admin / HR")}</p></div><a class="button" href="/leave/new">Request leave</a></header>
-    <section class="cards"><div><strong>${balance.annualBalance}</strong><span>Annual leave balance</span></div><div><strong>${balance.pendingAnnual}</strong><span>Pending annual leave</span></div><div><strong>${balance.oilBalance}</strong><span>Off-in-lieu balance</span></div></section>
+    <section class="cards"><div><strong>${balance.annualBalance}</strong><span>Annual leave balance</span></div><div><strong>${balance.pendingAnnual}</strong><span>Pending annual leave</span></div><div><strong>${balance.mcBalance}</strong><span>MC balance</span></div><div><strong>${balance.pendingMc}</strong><span>Pending MC</span></div><div><strong>${balance.hospitalisationBalance}</strong><span>Hospitalisation balance</span></div><div><strong>${balance.pendingHospitalisation}</strong><span>Pending hospitalisation</span></div><div><strong>${balance.childcareBalance}</strong><span>Childcare balance</span></div><div><strong>${balance.pendingChildcare}</strong><span>Pending childcare</span></div><div><strong>${balance.oilBalance}</strong><span>Off-in-lieu balance</span></div><div><strong>${balance.unpaidTaken}</strong><span>Unpaid leave taken</span></div><div><strong>${balance.probation.underProbation ? "Yes" : "No"}</strong><span>Under probation</span></div></section>
     <section class="panel"><h2>Leave history</h2><table><thead><tr><th>Type</th><th>Dates</th><th>Days</th><th>Status</th><th>File</th></tr></thead><tbody>${rows || emptyRow(5)}</tbody></table></section>`, user);
 }
 
@@ -131,12 +133,12 @@ async function adminDashboard(env, user) {
   const empRows = [];
   for (const e of employees.results) {
     const b = await employeeBalance(env, e.id, year);
-    empRows.push(`<tr><td>${escapeHtml(e.name)}<small>${escapeHtml(e.email)}</small></td><td>${escapeHtml(e.department)}</td><td>${escapeHtml(e.join_date)}</td><td>${b.completedMonths}</td><td>${b.annualEntitlement}</td><td>${b.annualBalance}</td><td>${b.oilBalance}</td><td>${status(e.status)}</td><td><a href="/admin/employees/${e.id}/edit">Edit</a></td></tr>`);
+    empRows.push(`<tr><td>${escapeHtml(e.name)}<small>${escapeHtml(e.email)}</small></td><td>${escapeHtml(e.department)}</td><td>${escapeHtml(e.join_date)}</td><td>${b.probation.underProbation ? "Yes" : "No"}</td><td>${b.completedMonths}</td><td>${b.annualEntitlement}</td><td>${b.annualBalance}</td><td>${b.mcBalance}</td><td>${b.hospitalisationBalance}</td><td>${b.childcareBalance}</td><td>${b.oilBalance}</td><td>${status(e.status)}</td><td><a href="/admin/employees/${e.id}/edit">Edit</a></td></tr>`);
   }
   const reqRows = requests.results.map((r) => `<tr><td>${escapeHtml(r.name)}</td><td>${escapeHtml(r.leave_type)}</td><td>${r.start_date} to ${r.end_date}</td><td>${r.days}</td><td>${r.attachment_key ? `<a href="/attachments/${r.id}">Attachment</a>` : ""}</td><td class="actions"><form method="post" action="/admin/requests/${r.id}/approve"><button>Approve</button></form><form method="post" action="/admin/requests/${r.id}/reject"><button class="danger">Reject</button></form></td></tr>`).join("");
-  return htmlPage("Admin", `<header class="page-head"><div><h1>Admin dashboard</h1><p>Employees, pending approvals, exports, and setup.</p></div><div class="actions"><a class="button" href="/admin/employees/new">Add employee/user</a><a class="button ghost" href="/admin/holidays">Public holidays</a><a class="button ghost" href="/admin/export/employees.csv">Export employees</a><a class="button ghost" href="/admin/export/leaves.csv">Export leaves</a><a class="button ghost" href="/admin/export/audit-log.csv">Export audit log</a></div></header>
+  return htmlPage("Admin", `<header class="page-head"><div><h1>Admin dashboard</h1><p>Employees, pending approvals, exports, and setup.</p></div><div class="actions"><a class="button" href="/admin/employees/new">Add employee/user</a><a class="button ghost" href="/admin/settings">Settings</a><a class="button ghost" href="/admin/holidays">Public holidays</a><a class="button ghost" href="/admin/export/employees.csv">Export employees</a><a class="button ghost" href="/admin/export/leaves.csv">Export leaves</a><a class="button ghost" href="/admin/export/audit-log.csv">Export audit log</a></div></header>
     <section class="panel"><h2>Pending requests</h2><table><thead><tr><th>Employee</th><th>Type</th><th>Dates</th><th>Days</th><th>File</th><th>Action</th></tr></thead><tbody>${reqRows || emptyRow(6)}</tbody></table></section>
-    <section class="panel"><h2>Employees</h2><table><thead><tr><th>Name</th><th>Dept</th><th>Join date</th><th>Months</th><th>2026 entitlement</th><th>Annual bal.</th><th>OIL bal.</th><th>Status</th><th>Action</th></tr></thead><tbody>${empRows.join("") || emptyRow(9)}</tbody></table></section>`, user);
+    <section class="panel"><h2>Employees</h2><table><thead><tr><th>Name</th><th>Dept</th><th>Join date</th><th>Probation</th><th>Months</th><th>2026 entitlement</th><th>Annual</th><th>MC</th><th>Hosp.</th><th>Childcare</th><th>OIL</th><th>Status</th><th>Action</th></tr></thead><tbody>${empRows.join("") || emptyRow(13)}</tbody></table></section>`, user);
 }
 
 async function managerDashboard(env, user) {
@@ -145,20 +147,58 @@ async function managerDashboard(env, user) {
   return htmlPage("Team", `<section class="panel"><h1>Team approvals</h1><table><thead><tr><th>Employee</th><th>Type</th><th>Dates</th><th>Days</th><th>Status</th><th>Action</th></tr></thead><tbody>${rows || emptyRow(6)}</tbody></table></section>`, user);
 }
 
+async function adminSettingsPage(env, user) {
+  const keys = ["company_name", "default_annual_leave_entitlement", "enforce_mom_three_month_rule", "allow_admin_annual_leave_override", "default_mc_entitlement", "enforce_mom_mc_three_month_rule", "require_mc_attachment", "default_hospitalisation_entitlement", "enforce_mom_hospitalisation_three_month_rule", "require_hospitalisation_attachment", "enable_childcare_leave", "default_childcare_entitlement", "default_probation_period_months", "saturday_ph_compensation_method", "off_in_lieu_default_expiry_months"];
+  const values = Object.fromEntries(await Promise.all(keys.map(async (k) => [k, await setting(env, k, "")])));
+  const yesNo = (name) => `<label>${labelize(name)}<select name="${name}"><option value="yes" ${values[name] === "yes" ? "selected" : ""}>Yes</option><option value="no" ${values[name] === "no" ? "selected" : ""}>No</option></select></label>`;
+  return htmlPage("Admin settings", `<section class="panel"><h1>Admin settings</h1><form method="post" class="form-grid">
+    ${input("Company name", "company_name", "text", values.company_name || "LeaveDesk")}
+    ${input("Default annual leave entitlement", "default_annual_leave_entitlement", "number", values.default_annual_leave_entitlement || "14")}
+    ${yesNo("enforce_mom_three_month_rule")}
+    ${yesNo("allow_admin_annual_leave_override")}
+    ${input("Default MC entitlement", "default_mc_entitlement", "number", values.default_mc_entitlement || "14")}
+    ${yesNo("enforce_mom_mc_three_month_rule")}
+    ${yesNo("require_mc_attachment")}
+    ${input("Default hospitalisation entitlement", "default_hospitalisation_entitlement", "number", values.default_hospitalisation_entitlement || "60")}
+    ${yesNo("enforce_mom_hospitalisation_three_month_rule")}
+    ${yesNo("require_hospitalisation_attachment")}
+    ${yesNo("enable_childcare_leave")}
+    ${input("Default childcare entitlement", "default_childcare_entitlement", "number", values.default_childcare_entitlement || "6")}
+    ${input("Default probation period months", "default_probation_period_months", "number", values.default_probation_period_months || "3")}
+    <label>Saturday public holiday compensation<select name="saturday_ph_compensation_method"><option value="off_in_lieu" ${values.saturday_ph_compensation_method === "off_in_lieu" ? "selected" : ""}>Off-in-lieu</option><option value="salary_in_lieu" ${values.saturday_ph_compensation_method === "salary_in_lieu" ? "selected" : ""}>Salary in lieu</option><option value="none" ${values.saturday_ph_compensation_method === "none" ? "selected" : ""}>None</option></select></label>
+    ${input("Off-in-lieu expiry months", "off_in_lieu_default_expiry_months", "number", values.off_in_lieu_default_expiry_months || "12")}
+    <button>Save settings</button><a class="button ghost" href="/admin">Back</a>
+  </form></section>`, user);
+}
+
+async function saveAdminSettings(request, env, user) {
+  const data = await request.formData();
+  const before = {};
+  const after = {};
+  for (const [key, value] of data.entries()) {
+    before[key] = await setting(env, key, "");
+    after[key] = String(value);
+    await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)").bind(key, String(value)).run();
+  }
+  await audit(env, user.id, "admin_settings_changed", before, after, "Admin settings changed.");
+  return redirect("/admin/settings");
+}
+
 async function employeeForm(env, user) {
   const approvers = await env.DB.prepare("SELECT users.id, employees.name, users.role FROM users JOIN employees ON employees.id = users.employee_id WHERE users.active = 1 AND users.role IN ('admin', 'manager') ORDER BY employees.name").all();
   const opts = [`<option value="">Admin / HR fallback</option>`, ...approvers.results.map((a) => `<option value="${a.id}">${escapeHtml(a.name)} (${a.role})</option>`)].join("");
-  return htmlPage("Add employee", `<section class="panel"><h1>Add employee or user</h1><form method="post" class="form-grid">${input("Name", "name")}${input("Email", "email", "email")}${input("Department", "department")}${input("Job title", "job_title", "text", "", false)}${input("Join date", "join_date", "date")}${input("Password", "password", "password")}<label>Role<select name="role"><option value="employee">Employee</option><option value="manager">Manager / Approver</option><option value="admin">Admin / HR</option></select></label><label>Work pattern<select name="work_pattern"><option value="five_day">5-day Monday to Friday</option><option value="five_half_day">5.5-day week</option><option value="six_day">6-day week</option><option value="custom">Custom</option></select></label><label>Approver<select name="approver_user_id">${opts}</select></label>${input("Annual entitlement", "annual_entitlement", "number", "14")}<button>Save</button></form></section>`, user);
+  return htmlPage("Add employee", `<section class="panel"><h1>Add employee or user</h1><form method="post" class="form-grid">${input("Name", "name")}${input("Email", "email", "email")}${input("Department", "department")}${input("Job title", "job_title", "text", "", false)}${input("Join date", "join_date", "date")}${input("Password", "password", "password")}<label>Role<select name="role"><option value="employee">Employee</option><option value="manager">Manager / Approver</option><option value="admin">Admin / HR</option></select></label><label>Work pattern<select name="work_pattern"><option value="five_day">5-day Monday to Friday</option><option value="five_half_day">5.5-day week</option><option value="six_day">6-day week</option><option value="custom">Custom</option></select></label><label>Approver<select name="approver_user_id">${opts}</select></label>${input("Annual entitlement", "annual_entitlement", "number", "14")}${input("MC entitlement", "mc_entitlement", "number", "14")}${input("Hospitalisation entitlement", "hospitalisation_entitlement", "number", "60")}${input("Childcare entitlement", "childcare_entitlement", "number", "0")}${input("Probation period months", "probation_period_months", "number", "3")}<label><input type="checkbox" name="childcare_eligible" value="1"> Childcare leave eligible</label><label>Notes<textarea name="notes"></textarea></label><button>Save</button></form></section>`, user);
 }
 
 async function createEmployee(request, env, user) {
   const data = await request.formData();
   const joinDate = String(data.get("join_date"));
-  const probation = formatDate(addMonths(parseDate(joinDate), 3));
+  const probationMonths = Number(data.get("probation_period_months") || 3);
+  const probation = probationEndDate(joinDate, probationMonths);
   const employee = await env.DB.prepare(`
-    INSERT INTO employees (name, email, department, job_title, join_date, probation_end_date, annual_entitlement, work_pattern, approver_user_id, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active') RETURNING id
-  `).bind(data.get("name"), String(data.get("email")).toLowerCase(), data.get("department"), data.get("job_title") || "", joinDate, probation, Number(data.get("annual_entitlement") || 14), data.get("work_pattern") || "five_day", nullableInt(data.get("approver_user_id"))).first();
+    INSERT INTO employees (name, email, department, job_title, join_date, probation_start_date, probation_period_months, probation_end_date, annual_entitlement, mc_entitlement, hospitalisation_entitlement, childcare_eligible, childcare_entitlement, work_pattern, approver_user_id, status, notes)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?) RETURNING id
+  `).bind(data.get("name"), String(data.get("email")).toLowerCase(), data.get("department"), data.get("job_title") || "", joinDate, joinDate, probationMonths, probation, Number(data.get("annual_entitlement") || 14), Number(data.get("mc_entitlement") || 14), Number(data.get("hospitalisation_entitlement") || 60), data.get("childcare_eligible") === "1" ? 1 : 0, Number(data.get("childcare_entitlement") || 0), data.get("work_pattern") || "five_day", nullableInt(data.get("approver_user_id")), data.get("notes") || "").first();
   const passwordHash = await hashPassword(String(data.get("password") || "Password123"));
   const userRow = await env.DB.prepare("INSERT INTO users (employee_id, email, password_hash, role, active) VALUES (?, ?, ?, ?, 1) RETURNING id").bind(employee.id, String(data.get("email")).toLowerCase(), passwordHash, data.get("role") || "employee").first();
   await audit(env, user.id, "employee_created", null, { employee_id: employee.id, email: String(data.get("email")).toLowerCase(), role: data.get("role") }, "Employee/user created.");
@@ -187,14 +227,21 @@ async function editEmployeeForm(env, user, employeeId, error = "") {
     enforceThreeMonthRule: (await setting(env, "enforce_mom_three_month_rule", "yes")) === "yes",
     companyOverride: Boolean(employee.mom_eligibility_override),
   });
-  return htmlPage("Edit employee", `<section class="panel"><h1>Edit employee</h1>${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}<p>${escapeHtml(calc.explanation)}</p><form method="post" class="form-grid">
+  const probation = probationInfo(employee);
+  const balances = await employeeBalance(env, employeeId, 2026);
+  return htmlPage("Edit employee", `<section class="panel"><h1>Edit employee</h1>${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}<p>${escapeHtml(calc.explanation)}</p><p><strong>Probation:</strong> ${probation.underProbation ? "Yes" : "No"} | Start: ${escapeHtml(probation.startDate)} | End: ${escapeHtml(probation.endDate)} | Days remaining: ${probation.daysRemaining}</p><p class="notice">Changing join date, probation, or entitlements recalculates displayed leave balances. Manual adjustments below are kept separately and still apply.</p><form method="post" class="form-grid">
     ${input("Name", "name", "text", employee.name)}
     ${input("Email", "email", "email", employee.email)}
     ${input("Department", "department", "text", employee.department)}
     ${input("Job title", "job_title", "text", employee.job_title || "", false)}
     ${input("Join date", "join_date", "date", employee.join_date)}
+    ${input("Probation start date", "probation_start_date", "date", employee.probation_start_date || employee.join_date)}
+    ${input("Probation period months", "probation_period_months", "number", String(employee.probation_period_months || 3))}
     ${input("Probation end date", "probation_end_date", "date", employee.probation_end_date)}
     ${input("Annual entitlement", "annual_entitlement", "number", String(employee.annual_entitlement))}
+    ${input("MC entitlement", "mc_entitlement", "number", String(employee.mc_entitlement ?? 14))}
+    ${input("Hospitalisation entitlement", "hospitalisation_entitlement", "number", String(employee.hospitalisation_entitlement ?? 60))}
+    ${input("Childcare entitlement", "childcare_entitlement", "number", String(employee.childcare_entitlement ?? 0))}
     <label>Role<select name="role">
       <option value="employee" ${employee.role === "employee" ? "selected" : ""}>Employee</option>
       <option value="manager" ${employee.role === "manager" ? "selected" : ""}>Manager / Approver</option>
@@ -214,9 +261,22 @@ async function editEmployeeForm(env, user, employeeId, error = "") {
       <option value="resigned" ${employee.status === "resigned" ? "selected" : ""}>Resigned</option>
     </select></label>
     <label><input type="checkbox" name="mom_eligibility_override" value="1" ${employee.mom_eligibility_override ? "checked" : ""}> Company override for MOM 3-month eligibility</label>
+    <label>Probation override<select name="probation_status_override">
+      <option value="auto" ${employee.probation_status_override === "auto" ? "selected" : ""}>Automatic</option>
+      <option value="under_probation" ${employee.probation_status_override === "under_probation" ? "selected" : ""}>Force under probation</option>
+      <option value="confirmed" ${employee.probation_status_override === "confirmed" ? "selected" : ""}>Force confirmed</option>
+    </select></label>
+    <label><input type="checkbox" name="childcare_eligible" value="1" ${employee.childcare_eligible ? "checked" : ""}> Childcare leave eligible</label>
+    <label><input type="checkbox" name="extended_childcare_eligible" value="1" ${employee.extended_childcare_eligible ? "checked" : ""}> Extended childcare leave eligible</label>
     <label><input type="checkbox" name="active" value="1" ${employee.active ? "checked" : ""}> Login account active</label>
+    <label>Notes<textarea name="notes">${escapeHtml(employee.notes || "")}</textarea></label>
+    <label>Manual annual adjustment<input name="adjust_annual" type="number" step="0.5" value="0"></label>
+    <label>Manual MC adjustment<input name="adjust_medical" type="number" step="0.5" value="0"></label>
+    <label>Manual hospitalisation adjustment<input name="adjust_hospitalisation" type="number" step="0.5" value="0"></label>
+    <label>Manual childcare adjustment<input name="adjust_childcare" type="number" step="0.5" value="0"></label>
+    <label>Adjustment notes<input name="adjustment_notes" value=""></label>
     <button>Save changes</button><a class="button ghost" href="/admin">Cancel</a>
-  </form></section>`, user);
+  </form><div class="cards"><div><strong>${balances.annualBalance}</strong><span>Annual balance</span></div><div><strong>${balances.mcBalance}</strong><span>MC balance</span></div><div><strong>${balances.hospitalisationBalance}</strong><span>Hospitalisation balance</span></div><div><strong>${balances.childcareBalance}</strong><span>Childcare balance</span></div><div><strong>${balances.oilBalance}</strong><span>Off-in-lieu</span></div></div></section>`, user);
 }
 
 async function updateEmployee(request, env, user, employeeId) {
@@ -235,25 +295,43 @@ async function updateEmployee(request, env, user, employeeId) {
     department: String(data.get("department") || "").trim(),
     job_title: String(data.get("job_title") || "").trim(),
     join_date: String(data.get("join_date") || ""),
+    probation_start_date: String(data.get("probation_start_date") || data.get("join_date") || ""),
+    probation_period_months: Number(data.get("probation_period_months") || 3),
     probation_end_date: String(data.get("probation_end_date") || ""),
     annual_entitlement: Number(data.get("annual_entitlement") || 14),
+    mc_entitlement: Number(data.get("mc_entitlement") || 14),
+    hospitalisation_entitlement: Number(data.get("hospitalisation_entitlement") || 60),
+    childcare_eligible: data.get("childcare_eligible") === "1" ? 1 : 0,
+    childcare_entitlement: Number(data.get("childcare_entitlement") || 0),
+    extended_childcare_eligible: data.get("extended_childcare_eligible") === "1" ? 1 : 0,
     role: String(data.get("role") || "employee"),
     work_pattern: String(data.get("work_pattern") || "five_day"),
     custom_work_days: String(data.get("custom_work_days") || ""),
     approver_user_id: approverUserId,
     status: String(data.get("status") || "active"),
     mom_eligibility_override: data.get("mom_eligibility_override") === "1" ? 1 : 0,
+    probation_status_override: String(data.get("probation_status_override") || "auto"),
     active: data.get("active") === "1" ? 1 : 0,
+    notes: String(data.get("notes") || ""),
   };
   await env.DB.prepare(`
-    UPDATE employees SET name = ?, email = ?, department = ?, job_title = ?, join_date = ?, probation_end_date = ?, annual_entitlement = ?,
-      mom_eligibility_override = ?, work_pattern = ?, custom_work_days = ?, approver_user_id = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+    UPDATE employees SET name = ?, email = ?, department = ?, job_title = ?, join_date = ?, probation_start_date = ?, probation_period_months = ?, probation_end_date = ?, probation_status_override = ?, annual_entitlement = ?,
+      mc_entitlement = ?, hospitalisation_entitlement = ?, childcare_eligible = ?, childcare_entitlement = ?, extended_childcare_eligible = ?,
+      mom_eligibility_override = ?, work_pattern = ?, custom_work_days = ?, approver_user_id = ?, status = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
-  `).bind(after.name, after.email, after.department, after.job_title, after.join_date, after.probation_end_date, after.annual_entitlement, after.mom_eligibility_override, after.work_pattern, after.custom_work_days, after.approver_user_id, after.status, employeeId).run();
+  `).bind(after.name, after.email, after.department, after.job_title, after.join_date, after.probation_start_date, after.probation_period_months, after.probation_end_date, after.probation_status_override, after.annual_entitlement,
+    after.mc_entitlement, after.hospitalisation_entitlement, after.childcare_eligible, after.childcare_entitlement, after.extended_childcare_eligible,
+    after.mom_eligibility_override, after.work_pattern, after.custom_work_days, after.approver_user_id, after.status, after.notes, employeeId).run();
   await env.DB.prepare("UPDATE users SET email = ?, role = ?, active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
     .bind(after.email, after.role, after.active, before.user_id).run();
   if (before.join_date !== after.join_date) await audit(env, user.id, "join_date_changed", { join_date: before.join_date }, { join_date: after.join_date, employee_id: employeeId }, "Join date changed by admin.");
   if (Number(before.annual_entitlement) !== after.annual_entitlement) await audit(env, user.id, "entitlement_changed", { annual_entitlement: before.annual_entitlement }, { annual_entitlement: after.annual_entitlement, employee_id: employeeId }, "Annual entitlement changed by admin.");
+  if (Number(before.mc_entitlement) !== after.mc_entitlement) await audit(env, user.id, "mc_entitlement_changed", { mc_entitlement: before.mc_entitlement }, { mc_entitlement: after.mc_entitlement, employee_id: employeeId }, "MC entitlement changed by admin.");
+  if (Number(before.hospitalisation_entitlement) !== after.hospitalisation_entitlement) await audit(env, user.id, "hospitalisation_entitlement_changed", { hospitalisation_entitlement: before.hospitalisation_entitlement }, { hospitalisation_entitlement: after.hospitalisation_entitlement, employee_id: employeeId }, "Hospitalisation entitlement changed by admin.");
+  if (Number(before.childcare_entitlement) !== after.childcare_entitlement) await audit(env, user.id, "childcare_entitlement_changed", { childcare_entitlement: before.childcare_entitlement }, { childcare_entitlement: after.childcare_entitlement, employee_id: employeeId }, "Childcare entitlement changed by admin.");
+  if (before.probation_end_date !== after.probation_end_date || Number(before.probation_period_months) !== after.probation_period_months) await audit(env, user.id, "probation_changed", { probation_period_months: before.probation_period_months, probation_end_date: before.probation_end_date }, { probation_period_months: after.probation_period_months, probation_end_date: after.probation_end_date, employee_id: employeeId }, "Probation changed by admin.");
+  if (Number(before.approver_user_id || 0) !== Number(after.approver_user_id || 0)) await audit(env, user.id, "approver_changed", { approver_user_id: before.approver_user_id }, { approver_user_id: after.approver_user_id, employee_id: employeeId }, "Approver changed by admin.");
+  await saveManualAdjustments(env, user, employeeId, data);
   await audit(env, user.id, "employee_edited", before, after, "Employee profile updated.");
   await generateCreditsForEmployee(env, user.id, employeeId);
   return redirect("/admin");
@@ -274,7 +352,7 @@ async function submitLeave(request, env, user) {
   let days;
   try {
     days = chargeableLeaveDays({ startDate: data.get("start_date"), endDate: data.get("end_date"), halfDay: data.get("half_day") === "1", publicHolidays: [...holidays], workPattern: user.work_pattern, customWorkDays: user.custom_work_days || "" });
-    validateAttachment(data.get("attachment"), type.name);
+    validateAttachment(data.get("attachment"), await attachmentPolicyLeaveType(env, type.name));
     await ensureSufficientBalance(env, user.employee_id, type.balance_category, days);
   } catch (error) {
     await notifyAdmins(env, "Insufficient balance attempt", `${user.name}: ${error.message}`);
@@ -355,15 +433,43 @@ async function employeeBalance(env, employeeId, year) {
   const annualTaken = await sum(env, "SELECT COALESCE(SUM(days),0) AS total FROM leave_requests WHERE employee_id = ? AND balance_category = 'annual' AND status = 'approved' AND substr(start_date,1,4) = ?", [employeeId, String(year)]);
   const pendingAnnual = await sum(env, "SELECT COALESCE(SUM(days),0) AS total FROM leave_requests WHERE employee_id = ? AND balance_category = 'annual' AND status = 'pending' AND substr(start_date,1,4) = ?", [employeeId, String(year)]);
   const adjustments = await sum(env, "SELECT COALESCE(SUM(adjustment_days),0) AS total FROM leave_balances WHERE employee_id = ? AND balance_category = 'annual' AND year = ?", [employeeId, year]);
+  const mc = await categoryBalance(env, employeeId, "medical", employee.mc_entitlement ?? 14, year);
+  const hospTaken = await sum(env, "SELECT COALESCE(SUM(days),0) AS total FROM leave_requests WHERE employee_id = ? AND balance_category = 'hospitalisation' AND status = 'approved' AND substr(start_date,1,4) = ?", [employeeId, String(year)]);
+  const pendingHospitalisation = await sum(env, "SELECT COALESCE(SUM(days),0) AS total FROM leave_requests WHERE employee_id = ? AND balance_category = 'hospitalisation' AND status = 'pending' AND substr(start_date,1,4) = ?", [employeeId, String(year)]);
+  const hospitalisationAdjustments = await sum(env, "SELECT COALESCE(SUM(adjustment_days),0) AS total FROM leave_balances WHERE employee_id = ? AND balance_category = 'hospitalisation' AND year = ?", [employeeId, year]);
+  const paidSickUsed = mc.taken + hospTaken;
+  const hospitalisationBalance = round(Number(employee.hospitalisation_entitlement ?? 60) + hospitalisationAdjustments - paidSickUsed);
+  const childcare = await categoryBalance(env, employeeId, "childcare", employee.childcare_eligible ? Number(employee.childcare_entitlement || 0) : 0, year);
+  const unpaidTaken = await sum(env, "SELECT COALESCE(SUM(days),0) AS total FROM leave_requests WHERE employee_id = ? AND balance_category = 'unpaid' AND status = 'approved' AND substr(start_date,1,4) = ?", [employeeId, String(year)]);
   const oil = await sum(env, "SELECT COALESCE(SUM(credit_amount_days - used_amount_days),0) AS total FROM off_in_lieu_credits WHERE employee_id = ? AND status = 'active' AND expiry_date >= date('now')", [employeeId]);
   const pendingOil = await sum(env, "SELECT COALESCE(SUM(days),0) AS total FROM leave_requests WHERE employee_id = ? AND balance_category = 'off_in_lieu' AND status = 'pending'", [employeeId]);
-  return { completedMonths: calc.completedMonths, annualEntitlement: calc.payableEntitlement, annualBalance: round(calc.payableEntitlement + adjustments - annualTaken), pendingAnnual, oilBalance: round(oil), pendingOil, explanation: calc.explanation };
+  return {
+    completedMonths: calc.completedMonths,
+    annualEntitlement: calc.payableEntitlement,
+    annualBalance: round(calc.payableEntitlement + adjustments - annualTaken),
+    pendingAnnual,
+    mcBalance: mc.balance,
+    pendingMc: mc.pending,
+    mcUsed: mc.taken,
+    hospitalisationBalance,
+    pendingHospitalisation,
+    hospitalisationUsed: hospTaken,
+    totalPaidSickUsed: paidSickUsed,
+    childcareBalance: childcare.balance,
+    pendingChildcare: childcare.pending,
+    childcareUsed: childcare.taken,
+    unpaidTaken,
+    oilBalance: round(oil),
+    pendingOil,
+    probation: probationInfo(employee),
+    explanation: calc.explanation,
+  };
 }
 
 async function ensureSufficientBalance(env, employeeId, category, days) {
   if (category === "unpaid") return;
   const b = await employeeBalance(env, employeeId, new Date().getUTCFullYear());
-  const available = category === "off_in_lieu" ? b.oilBalance : category === "annual" ? b.annualBalance : 9999;
+  const available = category === "off_in_lieu" ? b.oilBalance : category === "annual" ? b.annualBalance : category === "medical" ? b.mcBalance : category === "hospitalisation" ? b.hospitalisationBalance : category === "childcare" ? b.childcareBalance : 0;
   if (available < days) throw new Error(`Insufficient ${category.replaceAll("_", " ")} balance.`);
 }
 
@@ -412,9 +518,53 @@ async function setting(env, key, fallback) {
   return row?.value ?? fallback;
 }
 
+async function attachmentPolicyLeaveType(env, leaveTypeName) {
+  if (leaveTypeName === "Medical Leave" && (await setting(env, "require_mc_attachment", "yes")) !== "yes") return "Annual Leave";
+  if (leaveTypeName === "Hospitalisation Leave" && (await setting(env, "require_hospitalisation_attachment", "yes")) !== "yes") return "Annual Leave";
+  return leaveTypeName;
+}
+
 async function sum(env, sql, values) {
   const stmt = env.DB.prepare(sql).bind(...values);
   return Number((await stmt.first())?.total || 0);
+}
+
+async function categoryBalance(env, employeeId, category, entitlement, year) {
+  const taken = await sum(env, "SELECT COALESCE(SUM(days),0) AS total FROM leave_requests WHERE employee_id = ? AND balance_category = ? AND status = 'approved' AND substr(start_date,1,4) = ?", [employeeId, category, String(year)]);
+  const pending = await sum(env, "SELECT COALESCE(SUM(days),0) AS total FROM leave_requests WHERE employee_id = ? AND balance_category = ? AND status = 'pending' AND substr(start_date,1,4) = ?", [employeeId, category, String(year)]);
+  const adjustments = await sum(env, "SELECT COALESCE(SUM(adjustment_days),0) AS total FROM leave_balances WHERE employee_id = ? AND balance_category = ? AND year = ?", [employeeId, category, year]);
+  return { taken, pending, adjustments, balance: round(Number(entitlement || 0) + adjustments - taken) };
+}
+
+async function saveManualAdjustments(env, user, employeeId, data) {
+  const year = new Date().getUTCFullYear();
+  const notes = String(data.get("adjustment_notes") || "Manual adjustment by admin.");
+  const fields = [
+    ["annual", "adjust_annual"],
+    ["medical", "adjust_medical"],
+    ["hospitalisation", "adjust_hospitalisation"],
+    ["childcare", "adjust_childcare"],
+  ];
+  for (const [category, field] of fields) {
+    const amount = Number(data.get(field) || 0);
+    if (!amount) continue;
+    await env.DB.prepare("INSERT INTO leave_balances (employee_id, balance_category, year, adjustment_days, notes, created_by) VALUES (?, ?, ?, ?, ?, ?)")
+      .bind(employeeId, category, year, amount, notes, user.id).run();
+    await audit(env, user.id, "manual_balance_adjustment", null, { employee_id: employeeId, balance_category: category, adjustment_days: amount, year }, notes);
+  }
+}
+
+function probationInfo(employee) {
+  const startDate = employee.probation_start_date || employee.join_date;
+  const endDate = employee.probation_end_date || probationEndDate(startDate, employee.probation_period_months || 3);
+  const today = new Date();
+  const end = parseDate(endDate);
+  let underProbation = today <= end;
+  if (employee.probation_status_override === "under_probation") underProbation = true;
+  if (employee.probation_status_override === "confirmed") underProbation = false;
+  const ms = parseDate(endDate).getTime() - Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate());
+  const daysRemaining = Math.max(0, Math.ceil(ms / 86400000));
+  return { startDate, endDate, underProbation, daysRemaining };
 }
 
 async function audit(env, userId, actionType, beforeValue, afterValue, notes = "") {
@@ -503,6 +653,9 @@ function status(value) {
 function emptyRow(cols) {
   return `<tr><td colspan="${cols}">No records yet.</td></tr>`;
 }
+function labelize(value) {
+  return String(value).replaceAll("_", " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
 function round(value) {
   return Math.round(Number(value) * 100) / 100;
 }
@@ -512,9 +665,13 @@ function csvResponse(filename, rows) {
   return new Response(csv, { headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="${filename}"` } });
 }
 function addMonths(date, months) {
-  const copy = new Date(date);
-  copy.setUTCMonth(copy.getUTCMonth() + months);
-  return copy;
+  const year = date.getUTCFullYear();
+  const month = date.getUTCMonth();
+  const day = date.getUTCDate();
+  const target = new Date(Date.UTC(year, month + Number(months || 0), 1));
+  const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+  target.setUTCDate(Math.min(day, lastDay));
+  return target;
 }
 function css() {
   return `body{margin:0;font-family:Inter,Arial,sans-serif;background:#f6f7f9;color:#17202a}main{max-width:1180px;margin:auto;padding:20px}nav{display:flex;gap:14px;justify-content:flex-end;margin-bottom:16px}a{color:#0b5cad}h1,h2{margin:0 0 12px}.panel,.auth{background:white;border:1px solid #e2e6ea;border-radius:8px;padding:18px;margin-bottom:16px}.auth{max-width:460px;margin:48px auto}.page-head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:16px}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:16px}.cards div{background:white;border:1px solid #e2e6ea;border-radius:8px;padding:16px}.cards strong{display:block;font-size:28px}.cards span,small{display:block;color:#5f6b76}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.inline-form,.actions{display:flex;gap:8px;flex-wrap:wrap}label{display:grid;gap:6px;font-weight:600}input,select,textarea{padding:10px;border:1px solid #cfd6dd;border-radius:6px;font:inherit}button,.button{display:inline-block;background:#1f6feb;color:white;border:0;border-radius:6px;padding:10px 12px;text-decoration:none;cursor:pointer}.ghost{background:#eef3f8;color:#1f2933}.danger{background:#b42318}table{width:100%;border-collapse:collapse}th,td{padding:10px;border-bottom:1px solid #e6e8eb;text-align:left;vertical-align:top}.status{padding:3px 8px;border-radius:999px;background:#eef3f8}.approved{background:#dff6dd}.rejected,.cancelled{background:#fde2df}.pending{background:#fff2cc}.error{color:#b42318}@media(max-width:760px){main{padding:12px}.page-head{display:block}table{font-size:14px;display:block;overflow-x:auto}.actions form{display:inline}}`;

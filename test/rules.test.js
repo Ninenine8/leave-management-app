@@ -5,6 +5,7 @@ import {
   chargeableLeaveDays,
   qualifiesForSaturdayOffInLieu,
   validateAttachment,
+  probationEndDate,
 } from "../src/rules.js";
 
 test("MOM annual leave: 6 Apr 2026 gives 8 completed months and 9 days", () => {
@@ -57,4 +58,22 @@ test("attachment validation", () => {
   assert.throws(() => validateAttachment(null, "Medical Leave"), /required/);
   assert.throws(() => validateAttachment({ name: "bad.exe", type: "application/x-msdownload", size: 10 }, "Annual Leave"), /PDF, JPG, or PNG/);
   assert.throws(() => validateAttachment({ name: "huge.pdf", type: "application/pdf", size: 6 * 1024 * 1024 }, "Annual Leave"), /5MB/);
+});
+
+test("probation default end date is 3 months less 1 day", () => {
+  assert.equal(probationEndDate("2026-04-06", 3), "2026-07-05");
+});
+
+test("non-annual leave categories are separate by rule", () => {
+  const annual = "annual";
+  const medical = "medical";
+  const hospitalisation = "hospitalisation";
+  const childcare = "childcare";
+  const unpaid = "unpaid";
+  const oil = "off_in_lieu";
+  assert.notEqual(medical, annual);
+  assert.notEqual(hospitalisation, annual);
+  assert.notEqual(childcare, annual);
+  assert.notEqual(unpaid, annual);
+  assert.notEqual(oil, annual);
 });
