@@ -5,7 +5,7 @@ compatibility_date = "2026-07-13"
 [[d1_databases]]
 binding = "DB"
 database_name = "leavedesk-db"
-database_id = 6739e135-aa91-4f2f-8e0a-37159e4474df
+database_id = "6739e135-aa91-4f2f-8e0a-37159e4474df"
 migrations_dir = "migrations"
 
 [[r2_buckets]]
